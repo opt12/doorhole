@@ -41,8 +41,24 @@ log = logger(__name__)
 # Maybe it should become a singleton.
 reqtree = None
 
+def build_child_links_index():
+	"""Scan the entire requirements tree and build a mapping from a UID (str)
+	to the list of UIDs (str) of items that declare it as a parent link."""
+	global reqtree
+	index = {}
+	for document in reqtree:
+		for item in iter_items(document):
+			child_uid = str(item.uid).strip()
+			for link in (item.links or []):
+				parent_uid = str(link).strip()
+				index.setdefault(parent_uid, []).append(child_uid)
+	return index
+
 class LinksDelegate(QStyledItemDelegate):
 	"""Custom delegate for rendering clickable links in the 'links' column."""
+
+	LINK_COLUMN_NAMES = ('links', 'childlinks')
+
 	def __init__(self, parent=None):
 		super(LinksDelegate, self).__init__(parent)
 		self.doc = QTextDocument(self)
@@ -64,7 +80,7 @@ class LinksDelegate(QStyledItemDelegate):
 		
 	def paint(self, painter, option, index):
 		mdl = index.model()
-		if mdl._headerData[index.column()] == 'links':
+		if mdl._headerData[index.column()] in self.LINK_COLUMN_NAMES:
 			links_data = mdl._data[index.row()][index.column()]
 			linksList = self.parseLinks(links_data)
 			self.getDoc(option, index, linksList)
@@ -79,7 +95,7 @@ class LinksDelegate(QStyledItemDelegate):
 
 	def sizeHint(self, option, index):
 		mdl = index.model()
-		if mdl._headerData[index.column()] == 'links':
+		if mdl._headerData[index.column()] in self.LINK_COLUMN_NAMES:
 			links_data = mdl._data[index.row()][index.column()]
 			linksList = self.parseLinks(links_data)
 			self.getDoc(option, index, linksList)
@@ -97,6 +113,13 @@ class LinksDelegate(QStyledItemDelegate):
 		"""
 		if not links_data or links_data == 'None' or links_data == '[]':
 			return []
+
+		if 'UID(' not in links_data:
+			# Einfaches Format: Komma-getrennte UIDs (z.B. berechnete Child-Links)
+			raw = links_data.strip('[]').replace("'", '')
+			uids = [u.strip().rstrip(',') for u in raw.replace('\n', ',').split(',')]
+			return [u for u in uids if u]
+
 		# Remove list brackets if present
 		links_data = links_data.strip('[]').replace("'", '')
 		
@@ -274,6 +297,15 @@ class RequirementsDelegate(QStyledItemDelegate):
 			#super(RequirementsDelegate, self).sizeHint(option, index)
 
 class RequirementSetModel(QAbstractTableModel):
+	# Standard-Spalten, die immer vorne stehen (fest definiert statt Magic Numbers)
+	_STANDARD_LEADING = ['uid', 'path', 'root', 'normative', 'derived', 'reviewed',
+							'level', 'header', 'ref', 'references', 'links', 'childlinks']
+
+	_DISPLAY_NAMES = {
+		'links': 'Parent Links',
+		'childlinks': 'Child Links',
+	}
+
 	def __init__(self, docId=None, parent=None):
 		super(RequirementSetModel, self).__init__(parent)
 		self._docId = docId
@@ -284,48 +316,37 @@ class RequirementSetModel(QAbstractTableModel):
 		global reqtree
 		self._document = reqtree.find_document(self._docId)
 
-		# Requirements attributes
-		# -----------------------
-		#
-		# Requirements attributes will be the column names in the table view.
-		#
-		# There are:
-		#  - standard attributes
-		#  - extended attributes (within single requirement)
-		#  - extended attributes with defaults (declared in document)
-		#  - extended attributes that concur to review timestamp (declared in document)
-		#
-		# Attribute names are the keys of items[x]._data
-		# We do a first loop to gather all user-defined attributes
+		stdHeaderData = {'path', 'root', 'active', 'normative', 'uid', 'level',
+							'header', 'text', 'derived', 'ref', 'references', 'reviewed', 'links'}
 
-		# Standard data (pulled from doorstop.item inspection)
-		stdHeaderData = {'path', 'root', 'active', 'normative', 'uid', 'level', 'header', 'text', 'derived', 'ref', 'references', 'reviewed', 'links'}
-
-		headerData =  []
+		headerData = []
 		for item in iter_items(self._document):
 			headerData += list(item._data.keys())
-			headerData = list(set(headerData)) # drop duplicates
+			headerData = list(set(headerData))
 
-		# Non-standard data that we will display in more columns:
 		userHeaderData = set(headerData) - stdHeaderData
 		if userHeaderData:
 			log.debug('['+str(self._document)+'] Custom requirements attributes: ' + str(userHeaderData))
 
-		# And we have now the column names.
-		# We put 'text' always to the last column because it usually is stretched.
-		# The 'active' field is always true - inactive requirements are not shown at all. Doorstop doesn't tell us about them.
-		self._headerData = ['uid', 'path', 'root', 'normative', 'derived', 'reviewed', 'level', 'header', 'ref', 'references', 'links'] + list(userHeaderData) + ['text']
+		self._headerData = self._STANDARD_LEADING + list(userHeaderData) + ['text']
 
-		# Another loop to fill in the table rows
+		# Child-Links müssen einmalig über den GESAMTEN Tree berechnet werden,
+		# da Kinder auch in anderen Dokumenten liegen können.
+		childLinksIndex = build_child_links_index()
+
 		self._data = []
 		for item in iter_items(self._document):
+			item_uid = str(item.uid).strip()
 			row = []
 			for f in self._headerData:
-				row.append(str(item.get(f)))
-			row.append(item) # Doorstop item reference cached in the last row
+				if f == 'childlinks':
+					row.append(','.join(childLinksIndex.get(item_uid, [])))
+				else:
+					row.append(str(item.get(f)))
+			row.append(item)
 			self._data.append(row)
 		log.debug('['+str(self._document)+'] Requirements reloaded')
-
+		
 	# TableView methods that must be implemented
 	def rowCount(self, index=QModelIndex()):
 		return len(self._data)
@@ -340,55 +361,57 @@ class RequirementSetModel(QAbstractTableModel):
 		item = self._data[index.row()][len(self._headerData)]
 		colName = self._headerData[index.column()]
 
-		if role == Qt.DisplayRole: #------------------------------------- Value
+		if role == Qt.DisplayRole:
+			if colName == 'childlinks':
+				return self._data[index.row()][index.column()]
 			return str(item.get(colName))
 
 		if role == Qt.EditRole:
+			if colName == 'childlinks':
+				return self._data[index.row()][index.column()]
 			return item.get(colName)
 
-		if role == Qt.BackgroundRole: #------------------------------------- BG
+		if role == Qt.BackgroundRole:
 			if not item.get('normative') or str(item.get('level')).endswith('.0'):
 				return QBrush(QColor('lightGray'))
 
-		if role == Qt.ForegroundRole: #------------------------------------- FG
+		if role == Qt.ForegroundRole:
 			if not item.get('normative') or str(item.get('level')).endswith('.0'):
 				return QBrush(QColor('gray'))
 
-		# For links column, also provide the raw data for the delegate
 		if colName == 'links' and role == Qt.UserRole:
 			return item.get(colName)
-
+		
 	def headerData(self, num, orientation, role=Qt.DisplayRole):
-
-		if orientation == Qt.Horizontal: # ---------------------- Column header
-			if role == Qt.DisplayRole: #--------------------------------- Value
-				return self._headerData[num]
-			if role == Qt.ForegroundRole: # -------------------------------- FG
-				# custom attributes: blue
-				if num > 10 and num < len(self._headerData) - 1:
+		if orientation == Qt.Horizontal:
+			if role == Qt.DisplayRole:
+				key = self._headerData[num]
+				return self._DISPLAY_NAMES.get(key, key)
+			if role == Qt.ForegroundRole:
+				leading = len(self._STANDARD_LEADING)
+				if leading <= num < len(self._headerData) - 1:
 					return QBrush(QColor('blue'))
 
-		if orientation == Qt.Vertical: #---------------------------- Row header
+		if orientation == Qt.Vertical:
 			item = self._data[num][len(self._headerData)]
-			if role == Qt.DisplayRole: #--------------------------------- Value
+			if role == Qt.DisplayRole:
 				return str(item.get('uid'))
-			if role == Qt.ForegroundRole: #--------------------------------- FG
-				# wrong items: red (TODO)
-				# unreviewed items: orange
+			if role == Qt.ForegroundRole:
 				if not item.get('reviewed'):
 					return QBrush(QColor('orange'))
-				# non-normative items: gray
-				if not item.get('normative') or str(item.get('level')).endswith('.0'): # non-normative items: dark gray
+				if not item.get('normative') or str(item.get('level')).endswith('.0'):
 					return QBrush(QColor('gray'))
-				# OK items: green
-				return QBrush(QColor('darkGreen')) # OK items
-			if role == Qt.ToolTipRole: #------------------------------------ TT
-				tt = "Reviewed: " + str(item.get('reviewed'))
-				return tt
+				return QBrush(QColor('darkGreen'))
+			if role == Qt.ToolTipRole:
+				return "Reviewed: " + str(item.get('reviewed'))
 		return QAbstractTableModel.headerData(self, num, orientation, role)
 
 	def flags(self, index):
-			return Qt.ItemIsEditable | Qt.ItemIsEnabled | Qt.ItemIsSelectable
+		colName = self._headerData[index.column()]
+		base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
+		if colName not in ('links', 'childlinks'):
+			base |= Qt.ItemIsEditable
+		return base
 
 	def setData(self, index, text):
 		item = self._data[index.row()][len(self._headerData)]
@@ -559,7 +582,9 @@ class RequirementManager(QWidget):
 		self.view.setItemDelegate(self.delegate)
 		# Set custom delegate for links column
 		linksCol = self.model._headerData.index('links')
+		childLinksCol = self.model._headerData.index('childlinks')
 		self.view.setItemDelegateForColumn(linksCol, self.linksDelegate)
+		self.view.setItemDelegateForColumn(childLinksCol, self.linksDelegate)
 		# Connect link click handler
 		self.view.clicked.connect(self.onLinkClicked)
 		self.view.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -641,10 +666,9 @@ class RequirementManager(QWidget):
 		menu.exec(self.view.mapToGlobal(pos))
 
 	def onLinkClicked(self, index):
-		"""Handle clicks on links in the links column."""
-		if self.model._headerData[index.column()] != 'links':
+		colName = self.model._headerData[index.column()]
+		if colName not in ('links', 'childlinks'):
 			return
-		# Get the link at the click position
 		pos = self.view.viewport().mapFromGlobal(QCursor.pos())
 		linkPos = self.view.visualRect(index).topLeft()
 		relativePos = pos - linkPos
@@ -653,7 +677,7 @@ class RequirementManager(QWidget):
 			uid = delegate.getLinkAtPos(relativePos)
 			if uid:
 				self.navigateToRequirement(uid)
-
+				
 	def navigateToRequirement(self, uid):
 		"""Navigate to the tab and row containing the given UID."""
 		global reqtree
