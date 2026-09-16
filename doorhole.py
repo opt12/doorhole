@@ -866,6 +866,7 @@ class RequirementManager(QWidget):
 				f"Requirement UID copied to clipboard:\n{uid}")
 
 	def onCustomContextMenuRequested(self, pos):
+		global reqtree
 		menu = QMenu()
 		idx = self.view.indexAt(pos)
 		item = self.model.getItem(idx)
@@ -904,11 +905,122 @@ class RequirementManager(QWidget):
 					menu.addAction(setDerived)
 
 		menu.addSeparator()
+		createChildMenu = menu.addMenu('Create linked child in')
+		for document in reqtree:
+			docAction = QAction(document.prefix, createChildMenu)
+			docAction.triggered.connect(
+				lambda checked=False, target_prefix=document.prefix: self.onCreateLinkedChild(idx, target_prefix)
+			)
+			createChildMenu.addAction(docAction)
+
+		menu.addSeparator()
 		deleteReq = QAction('Delete '+str(item)+' from disk')
 		deleteReq.triggered.connect(lambda: self.model.deleteRow(idx))
 		menu.addAction(deleteReq)
 
 		menu.exec(self.view.mapToGlobal(pos))
+
+	def onCreateLinkedChild(self, qidx, target_prefix):
+		"""Create a new item in the target document, reusing the parent's
+		number (with a letter suffix if that number is already taken in the
+		target document) and copying the parent's level. Links the new item
+		to the parent."""
+		global reqtree
+
+		parent_item = self.model.getItem(qidx)
+		if parent_item is None:
+			return
+
+		target_document = reqtree.find_document(target_prefix)
+		if target_document is None:
+			QMessageBox.critical(self, "Error", f"Document '{target_prefix}' not found.")
+			return
+
+		source_document = self.model._document
+		parent_prefix = str(source_document.prefix)
+		parent_sep = getattr(source_document, 'sep', '')
+		parent_uid_str = str(parent_item.uid)
+
+		prefix_and_sep = parent_prefix + parent_sep
+		if parent_uid_str.startswith(prefix_and_sep):
+			number_part = parent_uid_str[len(prefix_and_sep):]
+		else:
+			number_part = parent_uid_str[len(parent_prefix):]
+
+		parent_level = Level(parent_item.get('level'))
+
+		new_item = None
+		suffix_index = 0
+		while new_item is None:
+			suffix = '' if suffix_index == 0 else chr(ord('a') + suffix_index - 1)
+			candidate_name = number_part + suffix
+			try:
+				new_item = target_document.add_item(
+					level=parent_level,
+					name=candidate_name,
+					reorder=False,
+				)
+			except doorstop.DoorstopError:
+				suffix_index += 1
+				if suffix_index > 26:
+					QMessageBox.critical(self, "Error",
+						"Could not find a free UID after 26 suffix attempts.")
+					return
+
+		if parent_level.heading:
+			new_item.set('normative', False)
+		new_item.set('derived', False)
+		new_item.link(str(parent_item.uid))
+		new_item.save()
+
+		log.debug(f"Created linked child '{new_item.uid}' in '{target_prefix}', "
+				f"linked to parent '{parent_item.uid}'")
+
+		main_window = self.parent()
+		while main_window and not isinstance(main_window, MainWindow):
+			main_window = main_window.parent()
+		if not main_window:
+			return
+
+		target_req_manager = None
+		source_req_manager = None
+		for req_manager in main_window._requirementManagers:
+			if req_manager._docId == target_prefix:
+				target_req_manager = req_manager
+			if req_manager._docId == self._docId:
+				source_req_manager = req_manager
+
+		for req_manager in (target_req_manager, source_req_manager):
+			if req_manager is None:
+				continue
+			req_manager.model.beginResetModel()
+			req_manager.model.load()
+			req_manager.model.endResetModel()
+			req_manager.delegate._htmlCache.clear()
+			req_manager.delegate._currentCacheKey = None
+
+		if target_req_manager is None:
+			return
+
+		# Activate the outer tab containing the target document
+		for i in range(main_window.tabs.count()):
+			tab_widget = main_window.tabs.widget(i)
+			if tab_widget.findChild(RequirementManager) is target_req_manager:
+				main_window.tabs.setCurrentIndex(i)
+				break
+
+		# Find the row of the newly created item
+		new_uid = str(new_item.uid).strip()
+		target_model = target_req_manager.model
+		row = 0
+		for r in range(target_model.rowCount(QModelIndex())):
+			row_item = target_model._data[r][len(target_model._headerData)]
+			if str(row_item.uid).strip() == new_uid:
+				row = r
+				break
+
+		text_col = target_model._headerData.index('text')
+		target_req_manager._scrollToRow(target_model, target_req_manager.view, row, edit_column=text_col)
 
 	def onLinkClicked(self, index):
 		colName = self.model._headerData[index.column()]
@@ -976,6 +1088,7 @@ class RequirementManager(QWidget):
 		row = self._scrollRow
 		model = self._scrollModel
 		view = self._scrollView
+		edit_column = getattr(self, '_scrollEditColumn', None)
 
 		col = self._firstVisibleColumn(view, model)
 		idx = model.index(row, col)
@@ -994,6 +1107,10 @@ class RequirementManager(QWidget):
 		if view.isVisible():
 			view.setFocus()
 		log.debug(f"Scrolled to row {row}")
+
+		if edit_column is not None:
+			edit_idx = model.index(row, edit_column)
+			view.edit(edit_idx)
 
 	def _captureAnchorUid(self):
 		"""Liefert die zuletzt bekannte Anker-UID. Fällt nur beim allerersten
@@ -1020,13 +1137,14 @@ class RequirementManager(QWidget):
 					break
 		self._scrollToRow(self.model, self.view, row)	
 
-	def _scrollToRow(self, model, view, row):
+	def _scrollToRow(self, model, view, row, edit_column=None):
 		if row is None or row < 0:
 			row = 0
 		self._scrollRow = row
 		self._scrollModel = model
 		self._scrollView = view
 		self._scrollAttempts = 0
+		self._scrollEditColumn = edit_column
 		QTimer.singleShot(0, self._doScroll)
 
 	def _onCurrentChanged(self, current, previous):
