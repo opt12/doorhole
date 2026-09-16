@@ -704,6 +704,7 @@ class RequirementManager(QWidget):
 	def __init__(self, docId=None, parent=None):
 		super(RequirementManager, self).__init__(parent)
 		self._docId = docId
+		self._currentAnchorUid = None
 		self._geometryInitialized = False
 		self.load()
 
@@ -737,6 +738,7 @@ class RequirementManager(QWidget):
 		# Table
 		self.view = QTableView()
 		self.view.setModel(self.model)
+		self.view.selectionModel().currentChanged.connect(self._onCurrentChanged)
 		self.view.setItemDelegate(self.delegate)
 		# Set custom delegate for links column
 		linksCol = self.model._headerData.index('links')
@@ -784,7 +786,7 @@ class RequirementManager(QWidget):
 
 		# Buttons
 		reloadBtn = QPushButton("Reload")
-		reloadBtn.clicked.connect(self.model.load)
+		reloadBtn.clicked.connect(self.onReloadClicked)
 		
 		addBtn = QPushButton("Add")
 		addBtn.clicked.connect(self.onAddClicked)
@@ -920,7 +922,14 @@ class RequirementManager(QWidget):
 			uid = delegate.getLinkAtPos(relativePos)
 			if uid:
 				self.navigateToRequirement(uid)
-				
+
+	def onReloadClicked(self):
+		main_window = self.parent()
+		while main_window and not isinstance(main_window, MainWindow):
+			main_window = main_window.parent()
+		if main_window:
+			main_window.reloadAll()
+
 	def navigateToRequirement(self, uid):
 		"""Navigate to the tab and row containing the given UID."""
 		global reqtree
@@ -948,12 +957,8 @@ class RequirementManager(QWidget):
 						if str(row_item.uid).strip() != uid:
 							continue
 						log.debug(f"Navigating to {uid}: tab {i}, row {row}")
-						self._scrollRow = row
-						self._scrollModel = model
-						self._scrollView = view
-						self._scrollAttempts = 0
 						main_window.tabs.setCurrentIndex(i)
-						QTimer.singleShot(0, self._doScroll)
+						self._scrollToRow(model, view, row)
 						return
 		log.error(f"UID '{uid}' not found in requirements tree")
 		QMessageBox.information(self, "Link Not Found",
@@ -968,13 +973,15 @@ class RequirementManager(QWidget):
 	def _doScroll(self):
 		if not hasattr(self, '_scrollRow'):
 			return
-		row, model, view = self._scrollRow, self._scrollModel, self._scrollView
+		row = self._scrollRow
+		model = self._scrollModel
+		view = self._scrollView
 
 		col = self._firstVisibleColumn(view, model)
 		idx = model.index(row, col)
 		rect = view.visualRect(idx)
 
-		if (not rect.isValid() or rect.height() == 0) and self._scrollAttempts < 10:
+		if (not rect.isValid() or rect.height() == 0) and self._scrollAttempts < 20:
 			self._scrollAttempts += 1
 			QTimer.singleShot(10, self._doScroll)
 			return
@@ -984,15 +991,58 @@ class RequirementManager(QWidget):
 		view.scrollTo(idx, QAbstractItemView.PositionAtCenter)
 		view.setCurrentIndex(idx)
 		view.selectRow(row)
-		view.setFocus()
+		if view.isVisible():
+			view.setFocus()
 		log.debug(f"Scrolled to row {row}")
+
+	def _captureAnchorUid(self):
+		"""Liefert die zuletzt bekannte Anker-UID. Fällt nur beim allerersten
+		Aufruf (noch nie etwas selektiert) auf die oberste sichtbare Zeile zurück."""
+		if self._currentAnchorUid is not None:
+			return self._currentAnchorUid
+
+		if self.model.rowCount(QModelIndex()) == 0:
+			return None
+		idx = self.view.indexAt(self.view.viewport().rect().topLeft())
+		if not idx.isValid():
+			return None
+		item = self.model.getItem(idx)
+		return str(item.uid).strip() if item is not None else None
+
+	def _restoreAnchorUid(self, uid):
+		"""Scrollt zur Zeile mit uid, oder an den Anfang, falls nicht mehr vorhanden."""
+		row = 0
+		if uid is not None:
+			for r in range(self.model.rowCount(QModelIndex())):
+				row_item = self.model._data[r][len(self.model._headerData)]
+				if str(row_item.uid).strip() == uid:
+					row = r
+					break
+		self._scrollToRow(self.model, self.view, row)	
+
+	def _scrollToRow(self, model, view, row):
+		if row is None or row < 0:
+			row = 0
+		self._scrollRow = row
+		self._scrollModel = model
+		self._scrollView = view
+		self._scrollAttempts = 0
+		QTimer.singleShot(0, self._doScroll)
+
+	def _onCurrentChanged(self, current, previous):
+		"""Tracks the anchor UID continuously. Ignores invalid indices
+		(e.g. those caused by beginResetModel/endResetModel), so the
+		last known good anchor survives a reset."""
+		item = self.model.getItem(current)
+		if item is not None:
+			self._currentAnchorUid = str(item.uid).strip()
+		# Bei invalidem current (durch Reset) bewusst NICHT überschreiben
 
 # Main application
 class MainWindow(QMainWindow):
 	def __init__(self, parent=None):
 		super(MainWindow, self).__init__(parent)
 		self.setWindowTitle('Doorhole - doorstop requirements editor')
-		self.resize(1400, 900)  # Set default window size
 
 		global reqtree
 		reqtree = doorstop.build()
@@ -1000,23 +1050,52 @@ class MainWindow(QMainWindow):
 		self.tabs = QTabWidget()
 		self.setCentralWidget(self.tabs)
 
-		# One tab for each document
-		for document in reqtree:
-			# container widget
-			container = QTabWidget()
+		self._requirementManagers = []   # NEU
 
-			# widgets
+		for document in reqtree:
+			container = QTabWidget()
 			reqsW = QWidget()
 			reqsView = RequirementManager(document.prefix)
+			self._requirementManagers.append(reqsView)   # NEU
 
 			reqsLy = QVBoxLayout()
 			reqsLy.addWidget(reqsView)
 			reqsW.setLayout(reqsLy)
-
 			container.addTab(reqsW, 'Requirements')
 
 			title = document.parent + ' -> ' + document.prefix if document.parent else document.prefix
 			self.tabs.addTab(container, title)
+
+	def reloadAll(self):
+		"""Rebuild the entire requirements tree from disk and refresh every
+		open tab, preserving each tab's scroll position if the anchor
+		requirement still exists there."""
+		global reqtree
+
+		anchors = {}
+		for req_manager in self._requirementManagers:
+			anchors[req_manager] = req_manager._captureAnchorUid()
+
+		log.info("Rebuilding requirements tree from disk...")
+		reqtree = doorstop.build()
+
+		for req_manager in self._requirementManagers:
+			req_manager.model.beginResetModel()
+			req_manager.model.load()
+			req_manager.model.endResetModel()
+
+			req_manager.delegate._htmlCache.clear()
+			req_manager.delegate._currentCacheKey = None
+
+			# Nur resizen, wenn der Tab bereits einmal echte Geometrie hatte.
+			# Für noch nie gezeigte Tabs übernimmt showEvent() das später korrekt.
+			if req_manager._geometryInitialized:
+				req_manager.view.resizeColumnsToContents()
+				req_manager.view.resizeRowsToContents()
+
+			req_manager._restoreAnchorUid(anchors[req_manager])
+
+		log.info("Reload complete.")
 
 def start_app():
 	app = QApplication(sys.argv)
