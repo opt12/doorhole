@@ -159,9 +159,31 @@ class LinksDelegate(QStyledItemDelegate):
 		return None
 
 class RequirementsDelegate(QStyledItemDelegate):
+	# Constants
+	MIN_TEXT_WIDTH = 200  # Minimum width for the text column
+	INDENT_PER_LEVEL = 20  # Pixels per level of indentation
+	_DOCUMENT_CSS = """
+		table {
+			border-collapse: collapse;
+			margin: 6px 0;
+		}
+		th, td {
+			border: 1px solid #999999;
+			padding: 4px 8px;
+		}
+		th {
+			background-color: #e8e8e8;
+			font-weight: bold;
+		}
+	"""
+
+	# Instance Variables
+	indentTextByLevel = False  # Option to enable/disable indentation
+	
 	def __init__(self, parent=None):
 		super(RequirementsDelegate, self).__init__(parent)
 		self.doc = QTextDocument(self)
+		self.doc.setDefaultStyleSheet(self._DOCUMENT_CSS)
 		self.md = markdown.Markdown(extensions=EXTENSIONS)
 		self._htmlCache = {}  # key: (uid, text_hash, width) -> html string
 		self._currentCacheKey = None
@@ -181,13 +203,46 @@ class RequirementsDelegate(QStyledItemDelegate):
 			}
 			""")
 			return edit
+		
+		# Handle boolean columns with a custom combo box that has opaque background
+		item = index.model()._data[index.row()][len(index.model()._headerData)]
+		if colName in ('normative', 'derived') or isinstance(item.get(colName), bool):
+			combo = QComboBox(parent)
+			combo.addItems(['True', 'False'])
+			# Use base color from palette for opaque background (works with light/dark mode)
+			palette = combo.palette()
+			bg_color = option.palette.color(QPalette.Base)
+			palette.setColor(QPalette.Base, bg_color)
+			combo.setPalette(palette)
+			combo.setAutoFillBackground(True)
+			return combo
+		
 		return super(RequirementsDelegate, self).createEditor(parent, option, index) # editor chosen with the QtEditRole in model.data()
+	
+	def updateEditorGeometry(self, editor, option, index):
+		"""Ensure editor fills the cell properly to cover underlying text."""
+		# Ensure combo boxes fill the entire cell rectangle
+		if isinstance(editor, QComboBox):
+			editor.setGeometry(option.rect)
+		else:
+			super(RequirementsDelegate, self).updateEditorGeometry(editor, option, index)
 
 	def setEditorData(self, editor, index):
-		if index.model()._headerData[index.column()] == 'text':
+		colName = index.model()._headerData[index.column()]
+		
+		if colName == 'text':
 			editor.insertPlainText(index.data())
-		if index.model()._headerData[index.column()] == 'level': # would create an empty QLineEdit otherwise
+		elif colName == 'level': # would create an empty QLineEdit otherwise
 			editor.setText(index.data())
+		elif isinstance(editor, QComboBox):
+			# Set the current value for boolean combo boxes
+			value = index.model().data(index, Qt.EditRole)
+			if isinstance(value, bool):
+				editor.setCurrentText('True' if value else 'False')
+			else:
+				editor.setCurrentText(str(value))
+			return
+		
 		return super(RequirementsDelegate, self).setEditorData(editor, index)
 
 	def setModelData(self, editor, model, index): # called after closing the editor
@@ -278,10 +333,29 @@ class RequirementsDelegate(QStyledItemDelegate):
 		if mdl._headerData[index.column()] == 'text':
 			# get rich text document and paint it
 			self.getDoc(option, index)
+			# Calculate indentation based on level
+			indent = 0
+			available_width = option.rect.width()
+			if self.indentTextByLevel:
+				item = mdl._data[index.row()][len(mdl._headerData)]
+				level_str = str(item.get('level'))
+				try:
+					level_depth = level_str.count('.')
+					# handle the x.0 edge case
+					if level_str.endswith(".0"):
+						level_depth = level_depth - 1
+				except Exception:
+					level_depth = 0
+				indent = self.INDENT_PER_LEVEL * level_depth
+				available_width = option.rect.width() - indent
+				if available_width < self.MIN_TEXT_WIDTH:
+					indent = max(0, option.rect.width() - self.MIN_TEXT_WIDTH)
+					available_width = self.MIN_TEXT_WIDTH
 			ctx = QAbstractTextDocumentLayout.PaintContext()
 			painter.save()
-			painter.translate(option.rect.topLeft());
-			painter.setClipRect(option.rect.translated(-option.rect.topLeft()))
+			painter.translate(option.rect.topLeft() + QPoint(indent, 0))
+			painter.setClipRect(option.rect.translated(-option.rect.topLeft() - QPoint(indent, 0)))
+			self.doc.setTextWidth(available_width)
 			self.doc.documentLayout().draw(painter, ctx)
 			painter.restore()
 		else:
@@ -290,10 +364,26 @@ class RequirementsDelegate(QStyledItemDelegate):
 	def sizeHint(self, option, index):
 		mdl = index.model()
 		if mdl._headerData[index.column()] == 'text':
-			# get rich text document and size it
 			self.getDoc(option, index)
-			#log.debug(mdl._headerData[index.column()] + "\t W: " + str(self.doc.idealWidth()) + " H: " +  str(self.doc.size().height()))
-			return QSize(self.doc.idealWidth(), self.doc.size().height())
+			indent = 0
+			available_width = option.rect.width()
+			if self.indentTextByLevel:
+				item = mdl._data[index.row()][len(mdl._headerData)]
+				level_str = str(item.get('level'))
+				try:
+					level_depth = level_str.count('.')
+					# handle the x.0 edge case
+					if level_str.endswith(".0"):
+						level_depth = level_depth - 1
+				except Exception:
+					level_depth = 0
+				indent = self.INDENT_PER_LEVEL * level_depth
+				available_width = option.rect.width() - indent
+				if available_width < self.MIN_TEXT_WIDTH:
+					indent = max(0, option.rect.width() - self.MIN_TEXT_WIDTH)
+					available_width = self.MIN_TEXT_WIDTH
+			self.doc.setTextWidth(available_width)
+			return QSize(self.doc.idealWidth() + indent, self.doc.size().height())
 		else:
 			return QSize(0,0)
 			#super(RequirementsDelegate, self).sizeHint(option, index)
@@ -375,7 +465,9 @@ class RequirementSetModel(QAbstractTableModel):
 
 		if role == Qt.BackgroundRole:
 			if not item.get('normative') or str(item.get('level')).endswith('.0'):
-				return QBrush(QColor('lightGray'))
+				# Use AlternateBase color from palette (adapts to light/dark mode)
+				palette = QApplication.palette()
+				return QBrush(palette.color(QPalette.AlternateBase))
 
 		if role == Qt.ForegroundRole:
 			if not item.get('normative') or str(item.get('level')).endswith('.0'):
@@ -419,6 +511,15 @@ class RequirementSetModel(QAbstractTableModel):
 		item = self._data[index.row()][len(self._headerData)]
 		attr = self._headerData[index.column()]
 
+		# Do not write read-only or system attributes via set_attributes
+		if attr in ('path', 'root', 'uid'):
+			self.layoutChanged.emit()
+			return True
+		# references/links require structured data; table only has string - skip to avoid errors
+		if attr in ('references', 'links') and isinstance(text, str):
+			self.layoutChanged.emit()
+			return True
+
 		# Boolean values are passed as "True" or "False" strings, so we need to determine whether the original datatype was boolean.
 		if type(item.get(attr)) == bool:
 			if text == 'True':
@@ -430,26 +531,38 @@ class RequirementSetModel(QAbstractTableModel):
 		if type(item.get(attr)) == int:
 			text = int(text)
 
-		# Strings are left as they are
-		if item.get(attr) != text:
+		# Compare using string form so we don't always "change" when types differ (e.g. Level vs str)
+		try:
+			changed = str(item.get(attr)) != str(text)
+		except Exception:
+			changed = True
+
+		if changed:
 			try:
 				attributes = { attr : text }
 				item.set_attributes(attributes)
 				item.save()
 				self._data[index.row()][index.column()] = item.get(attr)
 				log.debug('Updated requirement [' + str(item.get('uid')) + '] attribute ['+attr+']')
-			except doorstop.DoorstopError:
-				log.error('Requirement [' + str(item.get('uid')) + '] file not saved - manual edit required: ' + path)
+				self.dataChanged.emit(index, index, [Qt.DisplayRole, Qt.EditRole])
+			except doorstop.DoorstopError as e:
+				log.error('Requirement [' + str(item.get('uid')) + '] file not saved - manual edit required: ' + str(e))
+				self.layoutChanged.emit()
+				return False
 		self.layoutChanged.emit()
+		return True
 
 	def newReq(self, level=None):
 		global reqtree
 		if level is not None:
 			item = reqtree.add_item(value=str(self._docId), level=level)
 			log.debug("["+str(self._docId)+"] Added requirement " + str(item))
+			# New items are created with auto=False; set() won't save until we save explicitly
 			if item.get('level').heading: # make title items non-normative by default
 				item.set('normative', False)
 			item.set('derived', False) # set 'derived' property to False by default
+			item.save()
+			item.auto = True  # so future edits auto-save
 			self.load() # reload the whole document
 			self.layoutChanged.emit()
 
@@ -457,7 +570,8 @@ class RequirementSetModel(QAbstractTableModel):
 		global reqtree
 		item = self._data[row][len(self._headerData)]
 		reqid = str(item)
-		item.delete() # doorstop item deletion
+		# doorstop 3.x: delete() removes from document and deletes file
+		item.delete()
 		log.debug("["+str(self._docId)+"] Deleted requirement " + reqid)
 		self.load() # reload the whole document
 		self.layoutChanged.emit()
@@ -486,29 +600,44 @@ class RequirementSetModel(QAbstractTableModel):
 			new_level += 1
 		return new_level
 
+	def _saveRowAndNotify(self, row):
+		"""Emit dataChanged for a row so the view updates (e.g. row header color)."""
+		if 0 <= row < len(self._data):
+			top_left = self.index(row, 0)
+			bot_right = self.index(row, len(self._headerData) - 1)
+			self.dataChanged.emit(top_left, bot_right, [Qt.DisplayRole, Qt.BackgroundRole, Qt.ForegroundRole])
+
 	def deactivateRow(self, qidx):
 		row = qidx.row()
 		if row < len(self._data): # clicked requirement actually exists
 			item = self._data[row][len(self._headerData)]
 			item.set('normative', False)
+			item.save()
+			self._saveRowAndNotify(row)
 
 	def activateRow(self, qidx):
 		row = qidx.row()
 		if row < len(self._data): # clicked requirement actually exists
 			item = self._data[row][len(self._headerData)]
 			item.set('normative', True)
+			item.save()
+			self._saveRowAndNotify(row)
 
 	def deriveRow(self, qidx):
 		row = qidx.row()
 		if row < len(self._data): # clicked requirement actually exists
 			item = self._data[row][len(self._headerData)]
 			item.set('derived', True)
+			item.save()
+			self._saveRowAndNotify(row)
 
 	def underiveRow(self, qidx):
 		row = qidx.row()
 		if row < len(self._data): # clicked requirement actually exists
 			item = self._data[row][len(self._headerData)]
 			item.set('derived', False)
+			item.save()
+			self._saveRowAndNotify(row)
 
 	def deleteRow(self, qidx):
 		row = qidx.row()
@@ -593,7 +722,6 @@ class RequirementManager(QWidget):
 		self.view.customContextMenuRequested.connect(self.onCustomContextMenuRequested)
 
 		# Table appearance
-		self.view.setMinimumSize(1024, 768)
 		self.view.hideColumn(self.model._headerData.index('path'))
 		self.view.hideColumn(self.model._headerData.index('root'))
 		self.view.hideColumn(self.model._headerData.index('uid'))
@@ -603,24 +731,110 @@ class RequirementManager(QWidget):
 		self.view.horizontalHeader().setStretchLastSection(True)
 		self.view.setWordWrap(True)
 		self.view.resizeColumnsToContents()
+		
+		# Set wider default widths for level and header columns
+		try:
+			levelCol = self.model._headerData.index('level')
+			headerCol = self.model._headerData.index('header')
+			self.view.setColumnWidth(levelCol, 100)  # Fits ~9 characters for level numbers like "1.2.3"
+			self.view.setColumnWidth(headerCol, 170)  # Fits ~16 characters for header text
+		except ValueError:
+			# Columns might not exist, ignore
+			pass
+		
 		self.view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+		self.view.verticalHeader().sectionDoubleClicked.connect(self.onRowHeaderDoubleClicked)
 		self.view.setSelectionMode(QAbstractItemView.SingleSelection)
 		self.view.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
 		self.view.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel) # only has effect on the scrollbar dragging
 		self.view.verticalScrollBar().setSingleStep(15) # mouse wheel scrolling: restricted to 15px per "click"
 
+		# Indentation toggle
+		self.indentToggle = QCheckBox("Indent text column by level")
+		self.indentToggle.setChecked(self.delegate.indentTextByLevel)
+		self.indentToggle.setToolTip("Toggle indentation of the text column based on requirement level.")
+		self.indentToggle.stateChanged.connect(self.onIndentToggleChanged)
+
 		# Buttons
 		reloadBtn = QPushButton("Reload")
 		reloadBtn.clicked.connect(self.model.load)
-		# Placement
+		
+		addBtn = QPushButton("Add")
+		addBtn.clicked.connect(self.onAddClicked)
+		addBtn.setToolTip("Add a new requirement after the selected item, or at the end if none selected")
+		
+		removeBtn = QPushButton("Remove")
+		removeBtn.clicked.connect(self.onDeleteClicked)
+		removeBtn.setToolTip("Remove the selected requirement")
+		
+		# Store button references for enabling/disabling
+		self.deleteBtn = removeBtn
+		
+		# Connect selection changes to enable/disable remove button
+		self.view.selectionModel().selectionChanged.connect(self.onSelectionChanged)
+		self.onSelectionChanged()  # Initial state
 
+		# Spacer
+		spacer = QSpacerItem(10, 30)
+
+		# Placement
 		ly = QVBoxLayout()
 		lyBtns = QHBoxLayout()
 		lyBtns.addWidget(reloadBtn)
+		lyBtns.addWidget(addBtn)
+		lyBtns.addWidget(removeBtn)
+		lyBtns.addSpacerItem(spacer)
+		lyBtns.addWidget(self.indentToggle)
 		lyBtns.addStretch()
 		ly.addLayout(lyBtns)
 		ly.addWidget(self.view)
 		self.setLayout(ly)
+
+	def onIndentToggleChanged(self, state):
+		self.delegate.indentTextByLevel = bool(state)
+		self.view.viewport().update()
+
+	def onAddClicked(self):
+		"""Handle Add button click - adds a new requirement after the selected item, or at the end."""
+		idx = self.view.currentIndex()
+		if idx.isValid() and idx.row() < len(self.model._data):
+			# Add after selected item
+			self.model.insertRowAfter(idx)
+		else:
+			# No selection or invalid - add at the end
+			# Find the last item's level and add after it
+			if len(self.model._data) > 0:
+				last_row = len(self.model._data) - 1
+				last_idx = self.model.index(last_row, 0)
+				self.model.insertRowAfter(last_idx)
+			else:
+				# Empty document - create first requirement at level 1
+				self.model.newReq(Level([1]))
+	
+	def onDeleteClicked(self):
+		"""Handle Delete button click - deletes the selected requirement."""
+		idx = self.view.currentIndex()
+		if idx.isValid():
+			self.model.deleteRow(idx)
+	
+	def onSelectionChanged(self):
+		"""Enable/disable delete button based on selection."""
+		idx = self.view.currentIndex()
+		self.deleteBtn.setEnabled(idx.isValid() and idx.row() < len(self.model._data))
+	
+	def onRowHeaderDoubleClicked(self, logicalIndex):
+		"""Handle double-click on row header to copy requirement UID to clipboard."""
+		if 0 <= logicalIndex < len(self.model._data):
+			item = self.model._data[logicalIndex][len(self.model._headerData)]
+			uid = str(item.get('uid'))
+			
+			# Copy to clipboard
+			clipboard = QApplication.clipboard()
+			clipboard.setText(uid)
+			
+			# Show brief feedback message
+			QMessageBox.information(self, "Copied", 
+				f"Requirement UID copied to clipboard:\n{uid}")
 
 	def onCustomContextMenuRequested(self, pos):
 		menu = QMenu()
@@ -751,6 +965,7 @@ class MainWindow(QMainWindow):
 	def __init__(self, parent=None):
 		super(MainWindow, self).__init__(parent)
 		self.setWindowTitle('Doorhole - doorstop requirements editor')
+		self.resize(1400, 900)  # Set default window size
 
 		global reqtree
 		reqtree = doorstop.build()
