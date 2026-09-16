@@ -211,7 +211,10 @@ class RequirementsDelegate(QStyledItemDelegate):
 		cache_key = (str(item.uid), hash(item.get('text')), width)
 
 		if self._currentCacheKey == cache_key:
-			return  # Doc ist schon exakt das, was wir brauchen
+			return
+
+		item_path = item.get('path')
+		item_path = os.path.dirname(os.path.realpath(item_path))
 
 		if cache_key in self._htmlCache:
 			cached = self._htmlCache[cache_key]
@@ -219,27 +222,21 @@ class RequirementsDelegate(QStyledItemDelegate):
 			text = item.get('text')
 			level = str(item.get('level'))
 			header = str(item.get('header'))
-			item_path = item.get('path')
-			item_path = os.path.dirname(os.path.realpath(item_path))
 
-			# mimick DS title and header attributes
 			lines = [l for l in text.splitlines()]
 			heading = ''
-			if level.endswith('.0'):  # Chapter title
+			if level.endswith('.0'):
 				heading += '#'*level.count('.') + ' ' + level[:-2] + ' '
 				if header.strip():
 					heading += header.strip() + '\n\n'
-					if len(lines):
-						lines = [heading] + lines
-					else:
-						lines = [heading]
+					lines = [heading] + lines if len(lines) else [heading]
 				else:
 					if len(lines):
 						heading += lines[0] + '\n\n'
 						lines = [heading] + lines[1:]
 					else:
 						lines = [heading]
-			else:  # Requirement
+			else:
 				if header.strip():
 					heading += '#'*(level.count('.') +1) + ' ' + level + ' ' + header.strip()
 					if item.normative:
@@ -251,7 +248,7 @@ class RequirementsDelegate(QStyledItemDelegate):
 
 			cwd_bkp = os.getcwd()
 			try:
-				os.chdir(item_path)
+				os.chdir(item_path)  # bleibt wegen PlantUML-Extension nötig (Cache-Dir etc.)
 				html = self.md.convert(text)
 				cached = ('html', html)
 			except Exception as e:
@@ -264,13 +261,18 @@ class RequirementsDelegate(QStyledItemDelegate):
 			self._htmlCache[cache_key] = cached
 
 		self._currentCacheKey = cache_key
+
+		# WICHTIG: Basis-URL setzen, damit relative Bildpfade IMMER korrekt aufgelöst
+		# werden - unabhängig von CWD, Timing, Cache-Hit/Miss oder Lazy-Loading durch Qt.
+		self.doc.setBaseUrl(QUrl.fromLocalFile(item_path + os.sep))
+
 		kind, content = cached
 		if kind == 'html':
 			self.doc.setHtml(content)
 		else:
 			self.doc.setMarkdown(content)
 		self.doc.setTextWidth(width)
-		
+				
 	def paint(self, painter, option, index):
 		mdl = index.model()
 		if mdl._headerData[index.column()] == 'text':
