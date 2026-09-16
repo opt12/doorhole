@@ -189,36 +189,41 @@ class RequirementsDelegate(QStyledItemDelegate):
 		self._currentCacheKey = None
 
 	def createEditor(self, parent, option, index):
-		if index.model()._headerData[index.column()] == 'text':
+		mdl = index.model()
+		colName = mdl._headerData[index.column()]
+
+		if colName == 'text':
 			edit = QPlainTextEdit(parent)
-			# set fixed font
 			fixed_font = QFontDatabase.systemFont(QFontDatabase.FixedFont)
 			fixed_font.setStyleHint(QFont.TypeWriter)
 			edit.setFont(fixed_font)
-			# set colors
 			edit.setStyleSheet("""
-			QPlainTextEdit {
-			color: black;
-			background: white;
-			}
+				QPlainTextEdit {
+					color: black;
+					background: white;
+				}
 			""")
 			return edit
-		
-		# Handle boolean columns with a custom combo box that has opaque background
-		item = index.model()._data[index.row()][len(index.model()._headerData)]
-		if colName in ('normative', 'derived') or isinstance(item.get(colName), bool):
-			combo = QComboBox(parent)
-			combo.addItems(['True', 'False'])
-			# Use base color from palette for opaque background (works with light/dark mode)
-			palette = combo.palette()
-			bg_color = option.palette.color(QPalette.Base)
-			palette.setColor(QPalette.Base, bg_color)
-			combo.setPalette(palette)
-			combo.setAutoFillBackground(True)
-			return combo
-		
-		return super(RequirementsDelegate, self).createEditor(parent, option, index) # editor chosen with the QtEditRole in model.data()
-	
+
+		item = mdl._data[index.row()][len(mdl._headerData)]
+		value = item.get(colName)
+
+		# Generischer Check statt hartcodierter Spaltennamen: erfasst automatisch
+		# ALLE booleschen Attribute (normative, derived, reviewed, ggf. zukünftige
+		# Custom-Attribute), nicht nur eine feste Liste.
+		if isinstance(value, bool):
+			edit = QComboBox(parent)
+			edit.addItems(['True', 'False'])
+			return edit
+
+		if colName == 'level':
+			# Level-Objekte werden von Qts Standard-Editor-Factory nicht erkannt
+			# (kein registrierter Editor für diesen Python-Typ), daher explizit
+			# ein einfaches QLineEdit erzwingen.
+			return QLineEdit(parent)
+
+		return super(RequirementsDelegate, self).createEditor(parent, option, index)
+
 	def updateEditorGeometry(self, editor, option, index):
 		"""Ensure editor fills the cell properly to cover underlying text."""
 		# Ensure combo boxes fill the entire cell rectangle
