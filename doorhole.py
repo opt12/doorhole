@@ -4,18 +4,16 @@
 # Builds functional matrix
 
 import doorstop
-from doorstop.core.types import iter_documents, iter_items, Level
+from doorstop.core.types import iter_items, Level
 import os
 import sys
 from PySide6.QtWidgets import *
 from PySide6.QtCore import *
 from PySide6.QtGui import *
-from PySide6.QtWebEngineWidgets import *
 import logging
 import markdown
 from plantuml_markdown import PlantUMLMarkdownExtension
 import tempfile
-import copy
 
 EXTENSIONS = (
 	'markdown.extensions.extra',
@@ -33,8 +31,7 @@ EXTENSIONS = (
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 logging.getLogger('doorstop').setLevel(logging.WARNING)
 logging.getLogger('MARKDOWN').setLevel(logging.WARNING)
-logger = logging.getLogger
-log = logger(__name__)
+log = logging.getLogger(__name__)
 
 
 # requirements tree is a global because it's shared by all classes.
@@ -188,6 +185,23 @@ class RequirementsDelegate(QStyledItemDelegate):
 		self._htmlCache = {}  # key: (uid, text_hash, width) -> html string
 		self._currentCacheKey = None
 
+	def _computeIndent(self, item, option):
+		if not self.indentTextByLevel:
+			return 0, option.rect.width()
+		level_str = str(item.get('level'))
+		try:
+			level_depth = level_str.count('.')
+			if level_str.endswith(".0"):
+				level_depth -= 1
+		except Exception:
+			level_depth = 0
+		indent = self.INDENT_PER_LEVEL * level_depth
+		available_width = option.rect.width() - indent
+		if available_width < self.MIN_TEXT_WIDTH:
+			indent = max(0, option.rect.width() - self.MIN_TEXT_WIDTH)
+			available_width = self.MIN_TEXT_WIDTH
+		return indent, available_width
+
 	def createEditor(self, parent, option, index):
 		mdl = index.model()
 		colName = mdl._headerData[index.column()]
@@ -253,15 +267,13 @@ class RequirementsDelegate(QStyledItemDelegate):
 	def setModelData(self, editor, model, index): # called after closing the editor
 		# We need to extract a value. Possible editors: https://doc.qt.io/qtforpython/PySide2/QtWidgets/QItemEditorFactory.html
 
-		# There ought to be be a better way.
-		editorType = str(type(editor))
-		if 'QComboBox' in editorType:
+		if isinstance(editor, QComboBox):
 			model.setData(index, editor.currentText())
-		elif 'QLineEdit' in editorType:
-			model.setData(index, editor.text())
-		elif 'QPlainTextEdit' in editorType:
+		elif isinstance(editor, QPlainTextEdit):
 			model.setData(index, editor.toPlainText())
-
+		elif isinstance(editor, QLineEdit):
+			model.setData(index, editor.text())
+			
 	def getDoc(self, option, index):
 		mdl = index.model()
 		if mdl._headerData[index.column()] != 'text':
@@ -302,7 +314,7 @@ class RequirementsDelegate(QStyledItemDelegate):
 			else:
 				if header.strip():
 					heading += '#'*(level.count('.') +1) + ' ' + level + ' ' + header.strip()
-					if item.normative:
+					if item.get('normative'):
 						heading += ' (' + str(item.uid) + ')'
 				else:
 					heading += '#'*(level.count('.') +1) + ' ' + level + ' ' + str(item.uid)
@@ -346,19 +358,7 @@ class RequirementsDelegate(QStyledItemDelegate):
 			available_width = option.rect.width()
 			if self.indentTextByLevel:
 				item = mdl._data[index.row()][len(mdl._headerData)]
-				level_str = str(item.get('level'))
-				try:
-					level_depth = level_str.count('.')
-					# handle the x.0 edge case
-					if level_str.endswith(".0"):
-						level_depth = level_depth - 1
-				except Exception:
-					level_depth = 0
-				indent = self.INDENT_PER_LEVEL * level_depth
-				available_width = option.rect.width() - indent
-				if available_width < self.MIN_TEXT_WIDTH:
-					indent = max(0, option.rect.width() - self.MIN_TEXT_WIDTH)
-					available_width = self.MIN_TEXT_WIDTH
+				indent, available_width = self._computeIndent(item, option)
 			ctx = QAbstractTextDocumentLayout.PaintContext()
 			painter.save()
 			painter.translate(option.rect.topLeft() + QPoint(indent, 0))
@@ -377,19 +377,7 @@ class RequirementsDelegate(QStyledItemDelegate):
 			available_width = option.rect.width()
 			if self.indentTextByLevel:
 				item = mdl._data[index.row()][len(mdl._headerData)]
-				level_str = str(item.get('level'))
-				try:
-					level_depth = level_str.count('.')
-					# handle the x.0 edge case
-					if level_str.endswith(".0"):
-						level_depth = level_depth - 1
-				except Exception:
-					level_depth = 0
-				indent = self.INDENT_PER_LEVEL * level_depth
-				available_width = option.rect.width() - indent
-				if available_width < self.MIN_TEXT_WIDTH:
-					indent = max(0, option.rect.width() - self.MIN_TEXT_WIDTH)
-					available_width = self.MIN_TEXT_WIDTH
+				indent, available_width = self._computeIndent(item, option)
 			self.doc.setTextWidth(available_width)
 			return QSize(self.doc.idealWidth() + indent, self.doc.size().height())
 		else:
@@ -400,7 +388,7 @@ class RequirementSetModel(QAbstractTableModel):
 	# Standard-Spalten, die immer vorne stehen (fest definiert statt Magic Numbers)
 	_STANDARD_LEADING = ['uid', 'path', 'root', 'normative', 'derived', 'reviewed',
 							'level', 'header', 'ref', 'references', 'links', 'childlinks']
-
+	_READONLY_COLUMNS = {'links', 'childlinks', 'uid', 'path', 'root', 'ref', 'references'}
 	_DISPLAY_NAMES = {
 		'links': 'Parent Links',
 		'childlinks': 'Child Links',
@@ -432,12 +420,10 @@ class RequirementSetModel(QAbstractTableModel):
 		stdHeaderData = {'path', 'root', 'active', 'normative', 'uid', 'level',
 							'header', 'text', 'derived', 'ref', 'references', 'reviewed', 'links'}
 
-		headerData = []
+		headerSet = set()
 		for item in iter_items(self._document):
-			headerData += list(item.data.keys())
-			headerData = list(set(headerData)) # drop duplicates
-
-		userHeaderData = set(headerData) - stdHeaderData
+			headerSet.update(item.data.keys())
+		userHeaderData = headerSet - stdHeaderData
 		if userHeaderData:
 			log.debug('['+str(self._document)+'] Custom requirements attributes: ' + str(userHeaderData))
 
@@ -530,35 +516,19 @@ class RequirementSetModel(QAbstractTableModel):
 	def flags(self, index):
 		colName = self._headerData[index.column()]
 		base = Qt.ItemIsEnabled | Qt.ItemIsSelectable
-		if colName not in ('links', 'childlinks'):
+		if colName not in self._READONLY_COLUMNS:
 			base |= Qt.ItemIsEditable
 		return base
 
-	def setData(self, index, text):
+	def setData(self, index, text, role=Qt.EditRole):
 		item = self._data[index.row()][len(self._headerData)]
 		attr = self._headerData[index.column()]
 
-		# Do not write read-only or system attributes via set_attributes
-		if attr in ('path', 'root', 'uid'):
-			self.layoutChanged.emit()
-			return True
-		# references/links require structured data; table only has string - skip to avoid errors
-		if attr in ('references', 'links') and isinstance(text, str):
-			self.layoutChanged.emit()
-			return True
-
-		# Boolean values are passed as "True" or "False" strings, so we need to determine whether the original datatype was boolean.
 		if type(item.get(attr)) == bool:
-			if text == 'True':
-				text = True
-			else:
-				text = False
-
-		# Integer values are passed as strings, so we need to convert back to integer
+			text = (text == 'True')
 		if type(item.get(attr)) == int:
 			text = int(text)
 
-		# Compare using string form so we don't always "change" when types differ (e.g. Level vs str)
 		try:
 			changed = str(item.get(attr)) != str(text)
 		except Exception:
@@ -566,8 +536,7 @@ class RequirementSetModel(QAbstractTableModel):
 
 		if changed:
 			try:
-				attributes = { attr : text }
-				item.set_attributes(attributes)
+				item.set_attributes({attr: text})
 				item.save()
 				self._data[index.row()][index.column()] = item.get(attr)
 				log.debug('Updated requirement [' + str(item.get('uid')) + '] attribute ['+attr+']')
@@ -728,12 +697,6 @@ class RequirementManager(QWidget):
 		self.delegate = RequirementsDelegate()
 		self.linksDelegate = LinksDelegate()
 
-	def onReload(self):
-		self.model.load()
-		self.delegate._htmlCache.clear()
-		self.delegate._currentCacheKey = None
-		self.model.layoutChanged.emit()
-
 	def loadView(self):
 		# Table
 		self.view = QTableView()
@@ -867,42 +830,44 @@ class RequirementManager(QWidget):
 
 	def onCustomContextMenuRequested(self, pos):
 		global reqtree
-		menu = QMenu()
 		idx = self.view.indexAt(pos)
 		item = self.model.getItem(idx)
-		if item is not None:
-			addReqBefore = QAction('Add new requirement before '+str(item))
-			addReqBefore.triggered.connect(lambda: self.model.insertRowBefore(idx))
-			menu.addAction(addReqBefore)
+		if item is None:
+			return
 
-			addReqAfter = QAction('Add new requirement after '+str(item))
-			addReqAfter.triggered.connect(lambda: self.model.insertRowAfter(idx))
-			menu.addAction(addReqAfter)
-			menu.addSeparator()
+		menu = QMenu()
+		addReqBefore = QAction('Add new requirement before '+str(item))
+		addReqBefore.triggered.connect(lambda: self.model.insertRowBefore(idx))
+		menu.addAction(addReqBefore)
 
-			if item.get('level').heading == False:
-				if item.get('normative'):
-					deactivateReq = QAction('Make '+str(item)+' not normative')
-					deactivateReq.triggered.connect(lambda: self.model.deactivateRow(idx))
-					deactivateReq.setToolTip("Changes the 'normative' attribute to False.\nNon-normative requirements are informative or are not valid on this specific project.")
-					menu.addAction(deactivateReq)
-				else:
-					activateReq = QAction('Make '+str(item)+' normative')
-					activateReq.triggered.connect(lambda: self.model.activateRow(idx))
-					activateReq.setToolTip("Changes the 'normative' attribute to True.\nNormative requirements must be implemented.")
-					menu.addAction(activateReq)
+		addReqAfter = QAction('Add new requirement after '+str(item))
+		addReqAfter.triggered.connect(lambda: self.model.insertRowAfter(idx))
+		menu.addAction(addReqAfter)
+		menu.addSeparator()
 
+		if item.get('level').heading == False:
 			if item.get('normative'):
-				if item.get('derived'):
-					setNotDerived = QAction('Make '+str(item)+' not derived')
-					setNotDerived.setToolTip("Changes the 'derived' attribute to False.\nNot derived requirements must have a parent requirement unless they're the top-level requirements.")
-					setNotDerived.triggered.connect(lambda: self.model.underiveRow(idx))
-					menu.addAction(setNotDerived)
-				else:
-					setDerived = QAction('Make '+str(item)+' derived')
-					setDerived.setToolTip("Changes the 'derived' attribute to True.\nDerived requirements don't need to have a parent requirement even if they're not top-level requirements.")
-					setDerived.triggered.connect(lambda: self.model.deriveRow(idx))
-					menu.addAction(setDerived)
+				deactivateReq = QAction('Make '+str(item)+' not normative')
+				deactivateReq.triggered.connect(lambda: self.model.deactivateRow(idx))
+				deactivateReq.setToolTip("Changes the 'normative' attribute to False.\nNon-normative requirements are informative or are not valid on this specific project.")
+				menu.addAction(deactivateReq)
+			else:
+				activateReq = QAction('Make '+str(item)+' normative')
+				activateReq.triggered.connect(lambda: self.model.activateRow(idx))
+				activateReq.setToolTip("Changes the 'normative' attribute to True.\nNormative requirements must be implemented.")
+				menu.addAction(activateReq)
+
+		if item.get('normative'):
+			if item.get('derived'):
+				setNotDerived = QAction('Make '+str(item)+' not derived')
+				setNotDerived.setToolTip("Changes the 'derived' attribute to False.\nNot derived requirements must have a parent requirement unless they're the top-level requirements.")
+				setNotDerived.triggered.connect(lambda: self.model.underiveRow(idx))
+				menu.addAction(setNotDerived)
+			else:
+				setDerived = QAction('Make '+str(item)+' derived')
+				setDerived.setToolTip("Changes the 'derived' attribute to True.\nDerived requirements don't need to have a parent requirement even if they're not top-level requirements.")
+				setDerived.triggered.connect(lambda: self.model.deriveRow(idx))
+				menu.addAction(setDerived)
 
 		menu.addSeparator()
 		createChildMenu = menu.addMenu('Create linked child in')
