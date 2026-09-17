@@ -74,7 +74,6 @@ class LinksDelegate(QStyledItemDelegate):
 		html += '</body></html>'
 		self.doc.setHtml(html)
 		self.doc.setTextWidth(width)
-		
 	def paint(self, painter, option, index):
 		mdl = index.model()
 		if mdl._headerData[index.column()] in self.LINK_COLUMN_NAMES:
@@ -101,7 +100,6 @@ class LinksDelegate(QStyledItemDelegate):
 
 	def parseLinks(self, links_data):
 		"""Parse links data into a list of UIDs.
-		
 		Doorstop links format: UID(<uid>
 		stamp=<stamp>)
 		Example: UID(SysR-002
@@ -112,14 +110,13 @@ class LinksDelegate(QStyledItemDelegate):
 			return []
 
 		if 'UID(' not in links_data:
-			# Einfaches Format: Komma-getrennte UIDs (z.B. berechnete Child-Links)
+			# Simple format: comma-separated UIDs (e.g. calculated child links)
 			raw = links_data.strip('[]').replace("'", '')
 			uids = [u.strip().rstrip(',') for u in raw.replace('\n', ',').split(',')]
 			return [u for u in uids if u]
 
 		# Remove list brackets if present
 		links_data = links_data.strip('[]').replace("'", '')
-		
 		uids = []
 		# Find all occurrences of "UID(" and extract the UID
 		idx = 0
@@ -145,7 +142,6 @@ class LinksDelegate(QStyledItemDelegate):
 			if uid and uid not in uids:
 				uids.append(uid)
 			idx = end_pos + 1
-		
 		return uids
 
 	def getLinkAtPos(self, pos):
@@ -176,13 +172,12 @@ class RequirementsDelegate(QStyledItemDelegate):
 
 	# Instance Variables
 	indentTextByLevel = False  # Option to enable/disable indentation
-	
 	def __init__(self, parent=None):
 		super(RequirementsDelegate, self).__init__(parent)
 		self.doc = QTextDocument(self)
 		self.doc.setDefaultStyleSheet(self._DOCUMENT_CSS)
 		self.md = markdown.Markdown(extensions=EXTENSIONS)
-		self._htmlCache = {}  # key: (uid, text_hash, width) -> html string
+		self._htmlCache = {}    # key: (uid, text_hash, width) -> html string
 		self._currentCacheKey = None
 
 	def _computeIndent(self, item, option):
@@ -222,18 +217,18 @@ class RequirementsDelegate(QStyledItemDelegate):
 		item = mdl._data[index.row()][len(mdl._headerData)]
 		value = item.get(colName)
 
-		# Generischer Check statt hartcodierter Spaltennamen: erfasst automatisch
-		# ALLE booleschen Attribute (normative, derived, reviewed, ggf. zukünftige
-		# Custom-Attribute), nicht nur eine feste Liste.
+		# Generic check instead of hardcoded column names: automatically
+		# captures ALL boolean attributes (normative, derived, reviewed, potentially
+		# future custom attributes), not just a fixed list.
 		if isinstance(value, bool):
 			edit = QComboBox(parent)
 			edit.addItems(['True', 'False'])
 			return edit
 
 		if colName == 'level':
-			# Level-Objekte werden von Qts Standard-Editor-Factory nicht erkannt
-			# (kein registrierter Editor für diesen Python-Typ), daher explizit
-			# ein einfaches QLineEdit erzwingen.
+			# Level objects are not recognized by Qt's standard editor factory
+			# (no registered editor for this Python type), therefore
+			# explicitly force a simple QLineEdit.
 			return QLineEdit(parent)
 
 		return super(RequirementsDelegate, self).createEditor(parent, option, index)
@@ -248,7 +243,6 @@ class RequirementsDelegate(QStyledItemDelegate):
 
 	def setEditorData(self, editor, index):
 		colName = index.model()._headerData[index.column()]
-		
 		if colName == 'text':
 			editor.insertPlainText(index.data())
 		elif colName == 'level': # would create an empty QLineEdit otherwise
@@ -261,7 +255,6 @@ class RequirementsDelegate(QStyledItemDelegate):
 			else:
 				editor.setCurrentText(str(value))
 			return
-		
 		return super(RequirementsDelegate, self).setEditorData(editor, index)
 
 	def setModelData(self, editor, model, index): # called after closing the editor
@@ -273,7 +266,6 @@ class RequirementsDelegate(QStyledItemDelegate):
 			model.setData(index, editor.toPlainText())
 		elif isinstance(editor, QLineEdit):
 			model.setData(index, editor.text())
-			
 	def getDoc(self, option, index):
 		mdl = index.model()
 		if mdl._headerData[index.column()] != 'text':
@@ -323,7 +315,7 @@ class RequirementsDelegate(QStyledItemDelegate):
 
 			cwd_bkp = os.getcwd()
 			try:
-				os.chdir(item_path)  # bleibt wegen PlantUML-Extension nötig (Cache-Dir etc.)
+				os.chdir(item_path)  # remains necessary because of PlantUML extension (cache dir etc.)
 				html = self.md.convert(text)
 				cached = ('html', html)
 			except Exception as e:
@@ -337,8 +329,8 @@ class RequirementsDelegate(QStyledItemDelegate):
 
 		self._currentCacheKey = cache_key
 
-		# WICHTIG: Basis-URL setzen, damit relative Bildpfade IMMER korrekt aufgelöst
-		# werden - unabhängig von CWD, Timing, Cache-Hit/Miss oder Lazy-Loading durch Qt.
+		# IMPORTANT: Set base URL so that relative image paths are ALWAYS resolved
+		# correctly - regardless of CWD, timing, cache hit/miss, or lazy loading by Qt.
 		self.doc.setBaseUrl(QUrl.fromLocalFile(item_path + os.sep))
 
 		kind, content = cached
@@ -347,7 +339,6 @@ class RequirementsDelegate(QStyledItemDelegate):
 		else:
 			self.doc.setMarkdown(content)
 		self.doc.setTextWidth(width)
-				
 	def paint(self, painter, option, index):
 		mdl = index.model()
 		if mdl._headerData[index.column()] == 'text':
@@ -385,7 +376,7 @@ class RequirementsDelegate(QStyledItemDelegate):
 			#super(RequirementsDelegate, self).sizeHint(option, index)
 
 class RequirementSetModel(QAbstractTableModel):
-	# Standard-Spalten, die immer vorne stehen (fest definiert statt Magic Numbers)
+	# Standard columns that always appear at the front (fixed definition instead of magic numbers)
 	_STANDARD_LEADING = ['uid', 'path', 'root', 'normative', 'derived', 'reviewed',
 							'level', 'header', 'ref', 'references', 'links', 'childlinks']
 	_READONLY_COLUMNS = {'links', 'childlinks', 'uid', 'path', 'root', 'ref', 'references'}
@@ -410,10 +401,10 @@ class RequirementSetModel(QAbstractTableModel):
 		# Requirements attributes will be the column names in the table view.
 		#
 		# There are:
-		#  - standard attributes
-		#  - extended attributes (within single requirement)
-		#  - extended attributes with defaults (declared in document)
-		#  - extended attributes that concur to review timestamp (declared in document)
+		#- standard attributes
+		#- extended attributes (within single requirement)
+		#- extended attributes with defaults (declared in document)
+		#- extended attributes that concur to review timestamp (declared in document)
 		#
 		# Attribute names are the keys of items[x].data (doorstop 3.x public API)
 		# We do a first loop to gather all user-defined attributes
@@ -429,8 +420,8 @@ class RequirementSetModel(QAbstractTableModel):
 
 		self._headerData = self._STANDARD_LEADING + list(userHeaderData) + ['text']
 
-		# Child-Links müssen einmalig über den GESAMTEN Tree berechnet werden,
-		# da Kinder auch in anderen Dokumenten liegen können.
+		# Child links must be calculated once across the ENTIRE tree,
+		# as children may also reside in other documents.
 		childLinksIndex = build_child_links_index()
 
 		self._data = []
@@ -445,7 +436,6 @@ class RequirementSetModel(QAbstractTableModel):
 			row.append(item)
 			self._data.append(row)
 		log.debug('['+str(self._document)+'] Requirements reloaded')
-		
 	# TableView methods that must be implemented
 	def rowCount(self, index=QModelIndex()):
 		return len(self._data)
@@ -484,7 +474,6 @@ class RequirementSetModel(QAbstractTableModel):
 
 		if colName == 'links' and role == Qt.UserRole:
 			return item.get(colName)
-		
 	def headerData(self, num, orientation, role=Qt.DisplayRole):
 		if orientation == Qt.Horizontal:
 			if role == Qt.DisplayRole:
@@ -559,7 +548,7 @@ class RequirementSetModel(QAbstractTableModel):
 			item.set('derived', False) # set 'derived' property to False by default
 			item.save()
 			item.auto = True  # so future edits auto-save
-			self.load() # reload the whole document
+			self.load()  # reload the whole document
 			self.layoutChanged.emit()
 
 	def delReq(self, row):
@@ -681,10 +670,9 @@ class RequirementManager(QWidget):
 		super().showEvent(event)
 		if not self._geometryInitialized:
 			self._geometryInitialized = True
-			# Jetzt hat das Widget garantiert echte Geometrie
+			# Now the widget is guaranteed to have real geometry
 			self.view.resizeColumnsToContents()
 			self.view.resizeRowsToContents()
-			
 	def load(self):
 		self.loadModel() # fills in the table
 		self.loadDelegate() # delegate is necessary to edit the "text" field
@@ -723,7 +711,6 @@ class RequirementManager(QWidget):
 		self.view.horizontalHeader().setStretchLastSection(True)
 		self.view.setWordWrap(True)
 		self.view.resizeColumnsToContents()
-		
 		# Set wider default widths for level and header columns
 		try:
 			levelCol = self.model._headerData.index('level')
@@ -733,7 +720,6 @@ class RequirementManager(QWidget):
 		except ValueError:
 			# Columns might not exist, ignore
 			pass
-		
 		self.view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
 		self.view.verticalHeader().sectionDoubleClicked.connect(self.onRowHeaderDoubleClicked)
 		self.view.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -750,18 +736,14 @@ class RequirementManager(QWidget):
 		# Buttons
 		reloadBtn = QPushButton("Reload")
 		reloadBtn.clicked.connect(self.onReloadClicked)
-		
 		addBtn = QPushButton("Add")
 		addBtn.clicked.connect(self.onAddClicked)
 		addBtn.setToolTip("Add a new requirement after the selected item, or at the end if none selected")
-		
 		removeBtn = QPushButton("Remove")
 		removeBtn.clicked.connect(self.onDeleteClicked)
 		removeBtn.setToolTip("Remove the selected requirement")
-		
 		# Store button references for enabling/disabling
 		self.deleteBtn = removeBtn
-		
 		# Connect selection changes to enable/disable remove button
 		self.view.selectionModel().selectionChanged.connect(self.onSelectionChanged)
 		self.onSelectionChanged()  # Initial state
@@ -802,30 +784,25 @@ class RequirementManager(QWidget):
 			else:
 				# Empty document - create first requirement at level 1
 				self.model.newReq(Level([1]))
-	
 	def onDeleteClicked(self):
 		"""Handle Delete button click - deletes the selected requirement."""
 		idx = self.view.currentIndex()
 		if idx.isValid():
 			self.model.deleteRow(idx)
-	
 	def onSelectionChanged(self):
 		"""Enable/disable delete button based on selection."""
 		idx = self.view.currentIndex()
 		self.deleteBtn.setEnabled(idx.isValid() and idx.row() < len(self.model._data))
-	
 	def onRowHeaderDoubleClicked(self, logicalIndex):
 		"""Handle double-click on row header to copy requirement UID to clipboard."""
 		if 0 <= logicalIndex < len(self.model._data):
 			item = self.model._data[logicalIndex][len(self.model._headerData)]
 			uid = str(item.get('uid'))
-			
 			# Copy to clipboard
 			clipboard = QApplication.clipboard()
 			clipboard.setText(uid)
-			
 			# Show brief feedback message
-			QMessageBox.information(self, "Copied", 
+			QMessageBox.information(self, "Copied",
 				f"Requirement UID copied to clipboard:\n{uid}")
 
 	def onCustomContextMenuRequested(self, pos):
@@ -1039,7 +1016,7 @@ class RequirementManager(QWidget):
 						return
 		log.error(f"UID '{uid}' not found in requirements tree")
 		QMessageBox.information(self, "Link Not Found",
-								f"Requirement '{uid}' was not found in the requirements tree.")
+							 f"Requirement '{uid}' was not found in the requirements tree.")
 
 	def _firstVisibleColumn(self, view, model):
 		for c in range(model.columnCount(QModelIndex())):
@@ -1078,8 +1055,8 @@ class RequirementManager(QWidget):
 			view.edit(edit_idx)
 
 	def _captureAnchorUid(self):
-		"""Liefert die zuletzt bekannte Anker-UID. Fällt nur beim allerersten
-		Aufruf (noch nie etwas selektiert) auf die oberste sichtbare Zeile zurück."""
+		"""Returns the last known anchor UID. Only falls back to the top visible row
+		on the very first call (if nothing has been selected yet)."""
 		if self._currentAnchorUid is not None:
 			return self._currentAnchorUid
 
@@ -1092,7 +1069,7 @@ class RequirementManager(QWidget):
 		return str(item.uid).strip() if item is not None else None
 
 	def _restoreAnchorUid(self, uid):
-		"""Scrollt zur Zeile mit uid, oder an den Anfang, falls nicht mehr vorhanden."""
+		"""Scrolls to the row with the given UID, or to the beginning if it is no longer present."""
 		row = 0
 		if uid is not None:
 			for r in range(self.model.rowCount(QModelIndex())):
@@ -1100,7 +1077,7 @@ class RequirementManager(QWidget):
 				if str(row_item.uid).strip() == uid:
 					row = r
 					break
-		self._scrollToRow(self.model, self.view, row)	
+		self._scrollToRow(self.model, self.view, row)
 
 	def _scrollToRow(self, model, view, row, edit_column=None):
 		if row is None or row < 0:
@@ -1119,7 +1096,7 @@ class RequirementManager(QWidget):
 		item = self.model.getItem(current)
 		if item is not None:
 			self._currentAnchorUid = str(item.uid).strip()
-		# Bei invalidem current (durch Reset) bewusst NICHT überschreiben
+		# Deliberately do NOT overwrite when current is invalid (due to reset)
 
 # Main application
 class MainWindow(QMainWindow):
@@ -1133,13 +1110,13 @@ class MainWindow(QMainWindow):
 		self.tabs = QTabWidget()
 		self.setCentralWidget(self.tabs)
 
-		self._requirementManagers = []   # NEU
+		self._requirementManagers = []
 
 		for document in reqtree:
 			container = QTabWidget()
 			reqsW = QWidget()
 			reqsView = RequirementManager(document.prefix)
-			self._requirementManagers.append(reqsView)   # NEU
+			self._requirementManagers.append(reqsView)
 
 			reqsLy = QVBoxLayout()
 			reqsLy.addWidget(reqsView)
@@ -1170,8 +1147,8 @@ class MainWindow(QMainWindow):
 			req_manager.delegate._htmlCache.clear()
 			req_manager.delegate._currentCacheKey = None
 
-			# Nur resizen, wenn der Tab bereits einmal echte Geometrie hatte.
-			# Für noch nie gezeigte Tabs übernimmt showEvent() das später korrekt.
+			# Only resize if the tab has already had real geometry.
+			# For tabs that have never been shown, showEvent() will handle this correctly later.
 			if req_manager._geometryInitialized:
 				req_manager.view.resizeColumnsToContents()
 				req_manager.view.resizeRowsToContents()
