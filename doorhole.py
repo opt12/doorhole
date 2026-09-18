@@ -805,6 +805,33 @@ class RequirementManager(QWidget):
 			QMessageBox.information(self, "Copied",
 				f"Requirement UID copied to clipboard:\n{uid}")
 
+	def _buildCreateChildMenu(self, parentMenu, idx, docPrefix):
+		"""Recursively populate parentMenu with the document hierarchy
+		rooted at the children of docPrefix, so only actual descendant
+		documents can be picked as a target for a linked child."""
+		global reqtree
+		childDocuments = sorted(
+			(d for d in reqtree if d.parent == docPrefix),
+			key=lambda d: d.prefix
+		)
+		for childDoc in childDocuments:
+			grandChildren = [d for d in reqtree if d.parent == childDoc.prefix]
+			if grandChildren:
+				subMenu = parentMenu.addMenu(childDoc.prefix)
+				createHereAction = QAction(f'Create in {childDoc.prefix}', subMenu)
+				createHereAction.triggered.connect(
+					lambda checked=False, target_prefix=childDoc.prefix: self.onCreateLinkedChild(idx, target_prefix)
+				)
+				subMenu.addAction(createHereAction)
+				subMenu.addSeparator()
+				self._buildCreateChildMenu(subMenu, idx, childDoc.prefix)
+			else:
+				docAction = QAction(childDoc.prefix, parentMenu)
+				docAction.triggered.connect(
+					lambda checked=False, target_prefix=childDoc.prefix: self.onCreateLinkedChild(idx, target_prefix)
+				)
+				parentMenu.addAction(docAction)
+
 	def onCustomContextMenuRequested(self, pos):
 		global reqtree
 		idx = self.view.indexAt(pos)
@@ -847,13 +874,10 @@ class RequirementManager(QWidget):
 				menu.addAction(setDerived)
 
 		menu.addSeparator()
-		createChildMenu = menu.addMenu('Create linked child in')
-		for document in reqtree:
-			docAction = QAction(document.prefix, createChildMenu)
-			docAction.triggered.connect(
-				lambda checked=False, target_prefix=document.prefix: self.onCreateLinkedChild(idx, target_prefix)
-			)
-			createChildMenu.addAction(docAction)
+		childDocuments = [d for d in reqtree if d.parent == self._docId]
+		if childDocuments:
+			createChildMenu = menu.addMenu('Create linked child in')
+			self._buildCreateChildMenu(createChildMenu, idx, self._docId)
 
 		menu.addSeparator()
 		deleteReq = QAction('Delete '+str(item)+' from disk')
