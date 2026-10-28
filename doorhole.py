@@ -887,10 +887,8 @@ class RequirementManager(QWidget):
 		menu.exec(self.view.mapToGlobal(pos))
 
 	def onCreateLinkedChild(self, qidx, target_prefix):
-		"""Create a new item in the target document, reusing the parent's
-		number (with a letter suffix if that number is already taken in the
-		target document) and copying the parent's level. Links the new item
-		to the parent."""
+		"""Create a new item in the target document, with an auto-assigned
+		number and the parent's level. Links the new item to the parent."""
 		global reqtree
 
 		parent_item = self.model.getItem(qidx)
@@ -902,36 +900,12 @@ class RequirementManager(QWidget):
 			QMessageBox.critical(self, "Error", f"Document '{target_prefix}' not found.")
 			return
 
-		source_document = self.model._document
-		parent_prefix = str(source_document.prefix)
-		parent_sep = getattr(source_document, 'sep', '')
-		parent_uid_str = str(parent_item.uid)
-
-		prefix_and_sep = parent_prefix + parent_sep
-		if parent_uid_str.startswith(prefix_and_sep):
-			number_part = parent_uid_str[len(prefix_and_sep):]
-		else:
-			number_part = parent_uid_str[len(parent_prefix):]
-
 		parent_level = Level(parent_item.get('level'))
 
-		new_item = None
-		suffix_index = 0
-		while new_item is None:
-			suffix = '' if suffix_index == 0 else chr(ord('a') + suffix_index - 1)
-			candidate_name = number_part + suffix
-			try:
-				new_item = target_document.add_item(
-					level=parent_level,
-					name=candidate_name,
-					reorder=False,
-				)
-			except doorstop.DoorstopError:
-				suffix_index += 1
-				if suffix_index > 26:
-					QMessageBox.critical(self, "Error",
-						"Could not find a free UID after 26 suffix attempts.")
-					return
+		new_item = target_document.add_item(
+			level=parent_level,
+			reorder=False,
+		)
 
 		if parent_level.heading:
 			new_item.set('normative', False)
